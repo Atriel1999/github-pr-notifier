@@ -1,0 +1,29 @@
+name: Check PRs and Reviews
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'  # 30분마다 실행
+  workflow_dispatch:  # 수동으로도 실행 가능
+
+jobs:
+  check-prs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          
+      - name: Install dependencies
+        run: npm install axios
+        
+      - name: Run PR checker
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GITHUB_USERNAME: ${{ secrets.MY_GITHUB_USERNAME }}
+          REPOS_TO_MONITOR: ${{ secrets.REPOS_TO_MONITOR }}
+        run: node repo-checker.js
