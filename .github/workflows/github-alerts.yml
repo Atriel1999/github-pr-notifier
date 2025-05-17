@@ -662,7 +662,7 @@ jobs:
               await checkForReviewRequests();
               await checkForNewReviews();
               await checkForNewIssuesAndComments();
-              await checkForNewOrgDiscussions();
+              //await checkForNewOrgDiscussions();
               
               console.log('모든 확인 완료');
             } catch (error) {
