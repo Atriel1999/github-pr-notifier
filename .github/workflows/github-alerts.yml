@@ -1,0 +1,274 @@
+name: GitHub Alerts
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'  # 30분마다 실행
+  workflow_dispatch:  # 수동으로도 실행 가능
+
+jobs:
+  monitor-github:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
+      - name: Install dependencies
+        run: npm install axios
+      
+      - name: Debug environment
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GITHUB_USERNAME: ${{ secrets.MY_GITHUB_USERNAME }}
+          REPOS_TO_MONITOR: ${{ secrets.REPOS_TO_MONITOR }}
+        run: |
+          node -e "
+          console.log('환경 변수 디버깅:');
+          console.log('GITHUB_TOKEN:', process.env.GITHUB_TOKEN ? '있음 (길이: ' + process.env.GITHUB_TOKEN.length + ')' : '없음');
+          console.log('DISCORD_WEBHOOK_URL:', process.env.DISCORD_WEBHOOK_URL ? '있음 (길이: ' + process.env.DISCORD_WEBHOOK_URL.length + ')' : '없음');
+          console.log('GITHUB_USERNAME:', process.env.GITHUB_USERNAME ? '있음 (' + process.env.GITHUB_USERNAME + ')' : '없음');
+          console.log('MY_GITHUB_USERNAME:', process.env.MY_GITHUB_USERNAME ? '있음 (' + process.env.MY_GITHUB_USERNAME + ')' : '없음');
+          "
+      
+      - name: Create notification script
+        run: |
+          cat > github-monitor.js << 'EOL'
+          const axios = require('axios');
+
+          // 환경 변수에서 설정 가져오기
+          const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+          const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
+          const GITHUB_USERNAME = process.env.GITHUB_USERNAME; 
+          
+          // 환경 변수 디버깅
+          console.log('==== 환경 변수 디버깅 ====');
+          console.log('GITHUB_TOKEN:', GITHUB_TOKEN ? '있음 (길이: ' + GITHUB_TOKEN.length + ')' : '없음');
+          console.log('DISCORD_WEBHOOK_URL:', DISCORD_WEBHOOK_URL ? '있음 (길이: ' + DISCORD_WEBHOOK_URL.length + ')' : '없음');
+          console.log('GITHUB_USERNAME:', GITHUB_USERNAME ? '있음 (' + GITHUB_USERNAME + ')' : '없음');
+          console.log('==== 환경 변수 디버깅 끝 ====');
+          
+          // JSON 문자열로 저장된 저장소 목록을 파싱
+          const REPOS_TO_MONITOR = JSON.parse(process.env.REPOS_TO_MONITOR || '[]');
+          
+          // 마지막 확인 시간 (State 유지가 안 되므로 항상 최근 2시간만 확인)
+          const lastCheckedTime = new Date();
+          lastCheckedTime.setHours(lastCheckedTime.getHours() - 2);
+          
+          console.log('GitHub 알림 체커 시작됨');
+          console.log('모니터링 중인 저장소:', REPOS_TO_MONITOR);
+          console.log('사용자:', GITHUB_USERNAME);
+          console.log('마지막 확인 시간:', lastCheckedTime.toISOString());
+          
+          // GitHub API 호출 설정
+          const githubAPI = axios.create({
+            baseURL: 'https://api.github.com',
+            headers: {
+              Authorization: `token ${GITHUB_TOKEN}`,
+              Accept: 'application/vnd.github.v3+json'
+            }
+          });
+          
+          // GitHub API에 사용할 추가 헤더 (Discussions API용)
+          const discussionsHeader = {
+            headers: {
+              Authorization: `token ${GITHUB_TOKEN}`,
+              Accept: 'application/vnd.github.v3+json,application/vnd.github.squirrel-girl-preview'
+            }
+          };
+          
+          // 새 PR 리뷰 요청 확인
+          async function checkForReviewRequests() {
+            console.log('PR 리뷰 요청 확인 중...');
+            
+            for (const repoFullName of REPOS_TO_MONITOR) {
+              const [owner, repo] = repoFullName.split('/');
+              
+              try {
+                console.log(`저장소 확인 중: ${owner}/${repo}`);
+                
+                // 열린 PR 목록 가져오기
+                const response = await githubAPI.get(`/repos/${owner}/${repo}/pulls`, {
+                  params: { state: 'open' }
+                });
+                
+                console.log(`${response.data.length}개의 열린 PR 발견`);
+                
+                // 각 PR에 대해 리뷰 요청 확인
+                for (const pr of response.data) {
+                  // PR 세부 정보 가져오기 (리뷰 요청 포함)
+                  const prDetail = await githubAPI.get(`/repos/${owner}/${repo}/pulls/${pr.number}`);
+                  
+                  // 나에게 리뷰 요청이 있는지 확인
+                  const requestedReviewers = prDetail.data.requested_reviewers || [];
+                  const isRequestedForMe = requestedReviewers.some(
+                    reviewer => reviewer.login.toLowerCase() === GITHUB_USERNAME.toLowerCase()
+                  );
+                  
+                  // PR 업데이트 시간이 마지막 확인 이후인지 확인
+                  const prUpdatedAt = new Date(pr.updated_at);
+                  
+                  if (isRequestedForMe && prUpdatedAt > lastCheckedTime) {
+                    console.log(`새 리뷰 요청 발견: ${pr.title}`);
+                    
+                    // Discord로 알림 보내기
+                    await sendDiscordNotification({
+                      title: `🔍 새 PR 리뷰 요청이 왔습니다`,
+                      description: `PR: ${pr.title}`,
+                      url: pr.html_url,
+                      author: pr.user.login,
+                      repo: `${owner}/${repo}`
+                    });
+                  }
+                }
+              } catch (error) {
+                console.error(`Error checking ${owner}/${repo} PRs:`, error.message);
+              }
+            }
+          }
+          
+          // 내 PR에 리뷰가 달렸는지 확인
+          async function checkForNewReviews() {
+            console.log('PR 리뷰 확인 중...');
+            
+            for (const repoFullName of REPOS_TO_MONITOR) {
+              const [owner, repo] = repoFullName.split('/');
+              
+              try {
+                // 내가 작성한 열린 PR 가져오기
+                const response = await githubAPI.get(`/repos/${owner}/${repo}/pulls`, {
+                  params: { state: 'open', creator: GITHUB_USERNAME }
+                });
+                
+                console.log(`${response.data.length}개의 내가 작성한 PR 발견`);
+                
+                // 각 PR에 대해 새 리뷰 확인
+                for (const pr of response.data) {
+                  // PR의 리뷰 목록 가져오기
+                  const reviews = await githubAPI.get(`/repos/${owner}/${repo}/pulls/${pr.number}/reviews`);
+                  
+                  // 마지막 확인 이후 새 리뷰가 있는지 확인
+                  const newReviews = reviews.data.filter(
+                    review => new Date(review.submitted_at) > lastCheckedTime
+                  );
+                  
+                  console.log(`PR #${pr.number}에 ${newReviews.length}개의 새 리뷰 발견`);
+                  
+                  // 새 리뷰가 있으면 알림 보내기
+                  for (const review of newReviews) {
+                    await sendDiscordNotification({
+                      title: `⚠️ PR에 새 리뷰가 등록되었습니다`,
+                      description: `PR: ${pr.title} - ${getReviewStateEmoji(review.state)} ${review.state}`,
+                      url: review.html_url,
+                      author: review.user.login,
+                      repo: `${owner}/${repo}`
+                    });
+                  }
+                }
+              } catch (error) {
+                console.error(`Error checking reviews for ${owner}/${repo}:`, error.message);
+              }
+            }
+          }
+          
+          // 리뷰 상태에 따른 이모지 반환
+          function getReviewStateEmoji(state) {
+            switch (state) {
+              case 'APPROVED': return '✅';
+              case 'CHANGES_REQUESTED': return '❌';
+              case 'COMMENTED': return '💬';
+              default: return '❓';
+            }
+          }
+          
+          // 텍스트 자르기 함수
+          function truncateText(text, maxLength) {
+            if (!text) return '';
+            if (text.length <= maxLength) return text;
+            return text.substring(0, maxLength) + '...';
+          }
+          
+          // Discord로 알림 보내기
+          async function sendDiscordNotification(data) {
+            try {
+              await axios.post(DISCORD_WEBHOOK_URL, {
+                embeds: [{
+                  title: data.title,
+                  description: data.description,
+                  url: data.url,
+                  color: 3447003, // 파란색
+                  author: {
+                    name: data.author
+                  },
+                  footer: {
+                    text: `Repository: ${data.repo}`
+                  },
+                  timestamp: new Date()
+                }]
+              });
+              console.log('알림 전송 완료:', data.title);
+            } catch (error) {
+              console.error('Discord 알림 전송 실패:', error.message);
+              console.error('오류 세부 정보:', error.response ? error.response.data : '응답 데이터 없음');
+            }
+          }
+          
+          // 테스트 알림 보내기
+          async function sendTestNotification() {
+            try {
+              console.log('테스트 알림 전송 시도 중...');
+              await axios.post(DISCORD_WEBHOOK_URL, {
+                embeds: [{
+                  title: '🔔 GitHub 알림 봇 테스트',
+                  description: '이 메시지는 GitHub 알림 봇이 정상적으로 작동하는지 확인하기 위한 테스트입니다.',
+                  color: 65280, // 녹색
+                  footer: {
+                    text: `테스트 메시지 - ${new Date().toISOString()}`
+                  }
+                }]
+              });
+              console.log('테스트 알림 전송 성공!');
+              return true;
+            } catch (error) {
+              console.error('테스트 알림 전송 실패:', error.message);
+              console.error('오류 세부 정보:', error.response ? error.response.data : '응답 데이터 없음');
+              return false;
+            }
+          }
+          
+          // 메인 함수
+          async function main() {
+            try {
+              // 먼저 테스트 알림 보내기
+              const testSuccess = await sendTestNotification();
+              
+              if (!testSuccess) {
+                console.error('테스트 알림 실패. 나머지 기능 실행 중단.');
+                return;
+              }
+              
+              // 각 기능별로 확인 실행
+              await checkForReviewRequests();
+              await checkForNewReviews();
+              
+              console.log('모든 확인 완료');
+            } catch (error) {
+              console.error('실행 중 오류 발생:', error);
+            }
+          }
+          
+          // 스크립트 실행
+          main();
+          EOL
+      
+      - name: Run notification script
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GITHUB_USERNAME: ${{ secrets.MY_GITHUB_USERNAME }}
+          REPOS_TO_MONITOR: ${{ secrets.REPOS_TO_MONITOR }}
+        run: node github-monitor.js
