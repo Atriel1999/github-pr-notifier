@@ -11,6 +11,15 @@ const REPOS_TO_MONITOR = JSON.parse(process.env.REPOS_TO_MONITOR || '[]');
 const lastCheckedTime = new Date();
 lastCheckedTime.setHours(lastCheckedTime.getHours() - 2);
 
+// 환경 변수 디버깅
+console.log('==== 환경 변수 디버깅 ====');
+console.log('환경 변수 목록:');
+console.log('GITHUB_TOKEN:', process.env.GITHUB_TOKEN ? '있음 (길이: ' + process.env.GITHUB_TOKEN.length + ')' : '없음');
+console.log('DISCORD_WEBHOOK_URL:', process.env.DISCORD_WEBHOOK_URL ? '있음 (길이: ' + process.env.DISCORD_WEBHOOK_URL.length + ')' : '없음');
+console.log('GITHUB_USERNAME:', process.env.GITHUB_USERNAME ? '있음 (' + process.env.GITHUB_USERNAME + ')' : '없음');
+console.log('MY_GITHUB_USERNAME:', process.env.MY_GITHUB_USERNAME ? '있음 (' + process.env.MY_GITHUB_USERNAME + ')' : '없음');
+console.log('==== 환경 변수 디버깅 끝 ====');
+
 console.log('GitHub 알림 체커 시작됨');
 console.log('모니터링 중인 저장소:', REPOS_TO_MONITOR);
 console.log('사용자:', GITHUB_USERNAME);
