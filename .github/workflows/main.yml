@@ -24,6 +24,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          GITHUB_USERNAME: ${{ secrets.GITHUB_USERNAME }}
+          GITHUB_USERNAME: ${{ secrets.MY_GITHUB_USERNAME }}
           REPOS_TO_MONITOR: ${{ secrets.REPOS_TO_MONITOR }}
         run: node repo-checker.js
