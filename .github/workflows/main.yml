@@ -26,4 +26,4 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           GITHUB_USERNAME: ${{ secrets.GITHUB_USERNAME }}
           REPOS_TO_MONITOR: ${{ secrets.REPOS_TO_MONITOR }}
-        run: node pr-checker.js
+        run: node repo-checker.js
