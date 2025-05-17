@@ -1,4 +1,4 @@
-name: Check PRs and Reviews
+name: Check GitHub Events
 
 on:
   schedule:
@@ -6,24 +6,31 @@ on:
   workflow_dispatch:  # 수동으로도 실행 가능
 
 jobs:
-  check-prs:
+  check-events:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
-        
+        with:
+          fetch-depth: 1  # 명시적으로 체크아웃 깊이 설정
+      
+      - name: List files for debugging
+        run: |
+          pwd
+          ls -la
+      
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
           node-version: '18'
-          
+      
       - name: Install dependencies
         run: npm install axios
-        
-      - name: Run PR checker
+      
+      - name: Run GitHub events checker
         env:
           GITHUB_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          GITHUB_USERNAME: ${{ secrets.MY_GITHUB_USERNAME }}
+          MY_GITHUB_USERNAME: ${{ secrets.MY_GITHUB_USERNAME }}
           REPOS_TO_MONITOR: ${{ secrets.REPOS_TO_MONITOR }}
-        run: node repo-checker.js
+        run: node $GITHUB_WORKSPACE/repo-checker.js
