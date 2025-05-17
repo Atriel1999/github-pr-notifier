@@ -1,7 +1,7 @@
 const axios = require('axios');
 
 // 환경 변수에서 설정 가져오기
-const GITHUB_TOKEN = process.env.PERSONAL_GITHUB_TOKEN;
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 const GITHUB_USERNAME = process.env.MY_GITHUB_USERNAME; 
 // JSON 문자열로 저장된 저장소 목록을 파싱
