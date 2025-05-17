@@ -22,7 +22,7 @@ jobs:
       
       - name: Debug environment
         env:
-          GITHUB_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
+          PERSONAL_GITHUB_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           GITHUB_USERNAME: ${{ secrets.MY_GITHUB_USERNAME }}
           REPOS_TO_MONITOR: ${{ secrets.REPOS_TO_MONITOR }}
@@ -40,10 +40,9 @@ jobs:
           cat > github-monitor.js << 'EOL'
           const axios = require('axios');
 
-          // 환경 변수에서 설정 가져오기
-          const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+          const GITHUB_TOKEN = process.env.PERSONAL_GITHUB_TOKEN;
           const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
-          const GITHUB_USERNAME = process.env.GITHUB_USERNAME; 
+          const GITHUB_USERNAME = process.env.GITHUB_USERNAME;
           
           // 환경 변수 디버깅
           console.log('==== 환경 변수 디버깅 ====');
