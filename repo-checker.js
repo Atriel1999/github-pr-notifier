@@ -7,9 +7,9 @@ const GITHUB_USERNAME = process.env.MY_GITHUB_USERNAME;
 // JSON 문자열로 저장된 저장소 목록을 파싱
 const REPOS_TO_MONITOR = JSON.parse(process.env.REPOS_TO_MONITOR || '[]');
 
-// 마지막 확인 시간 (State 유지가 안 되므로 항상 최근 30분만 확인)
+// 마지막 확인 시간 (State 유지가 안 되므로 항상 최근 2시간만 확인)
 const lastCheckedTime = new Date();
-lastCheckedTime.setMinutes(lastCheckedTime.getMinutes() - 30);
+lastCheckedTime.setHours(lastCheckedTime.getHours() - 2);
 
 console.log('GitHub 알림 체커 시작됨');
 console.log('모니터링 중인 저장소:', REPOS_TO_MONITOR);
