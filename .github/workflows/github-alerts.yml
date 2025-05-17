@@ -1,0 +1,645 @@
+name: GitHub Alerts
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'  # 30분마다 실행
+  workflow_dispatch:  # 수동으로도 실행 가능
+
+jobs:
+  monitor-github:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
+      - name: Install dependencies
+        run: npm install axios
+      
+      - name: Debug environment
+        env:
+          PERSONAL_GITHUB_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          MY_GITHUB_USERNAME: ${{ secrets.MY_GITHUB_USERNAME }}
+          REPOS_TO_MONITOR: ${{ secrets.REPOS_TO_MONITOR }}
+        run: |
+          node -e "
+          console.log('환경 변수 디버깅:');
+          console.log('GITHUB_TOKEN:', process.env.PERSONAL_GITHUB_TOKEN ? '있음 (길이: ' + process.env.PERSONAL_GITHUB_TOKEN.length + ')' : '없음');
+          console.log('DISCORD_WEBHOOK_URL:', process.env.DISCORD_WEBHOOK_URL ? '있음 (길이: ' + process.env.DISCORD_WEBHOOK_URL.length + ')' : '없음');
+          console.log('MY_GITHUB_USERNAME:', process.env.MY_GITHUB_USERNAME ? '있음 (' + process.env.MY_GITHUB_USERNAME + ')' : '없음');
+          "
+      
+      - name: Create notification script
+        run: |
+          cat > github-monitor.js << 'EOL'
+          const axios = require('axios');
+
+          const GITHUB_TOKEN = process.env.PERSONAL_GITHUB_TOKEN;
+          const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
+          const GITHUB_USERNAME = process.env.MY_GITHUB_USERNAME;
+          
+          // JSON 문자열로 저장된 저장소 목록을 파싱
+          const REPOS_TO_MONITOR = JSON.parse(process.env.REPOS_TO_MONITOR || '[]');
+          
+          // 마지막 확인 시간 (30분보다 약간 길게 설정)
+          const lastCheckedTime = new Date();
+          lastCheckedTime.setMinutes(lastCheckedTime.getMinutes() - 35); // 30분 + 5분 여유
+          
+          console.log('GitHub 알림 체커 시작됨!!');
+          console.log('모니터링 중인 저장소:', REPOS_TO_MONITOR);
+          console.log('사용자:', GITHUB_USERNAME);
+          console.log('마지막 확인 시간:', lastCheckedTime.toISOString());
+          
+          // GitHub API 호출 설정
+          const githubAPI = axios.create({
+            baseURL: 'https://api.github.com',
+            headers: {
+              Authorization: `token ${GITHUB_TOKEN}`,
+              Accept: 'application/vnd.github.v3+json'
+            }
+          });
+          
+          // GitHub API에 사용할 추가 헤더 (Discussions API용)
+          const discussionsHeader = {
+            headers: {
+              Authorization: `token ${GITHUB_TOKEN}`,
+              Accept: 'application/vnd.github.v3+json,application/vnd.github.squirrel-girl-preview'
+            }
+          };
+
+          // 새 이슈/이슈 댓글 확인
+          async function checkForNewIssuesAndComments() {
+            console.log('이슈 및 이슈 댓글 확인 중...');
+            
+            for (const repoFullName of REPOS_TO_MONITOR) {
+              const [owner, repo] = repoFullName.split('/');
+              
+              try {
+                // 1. 나에게 할당된 이슈 확인
+                const assignedIssues = await githubAPI.get(`/repos/${owner}/${repo}/issues`, {
+                  params: { 
+                    state: 'open', 
+                    assignee: GITHUB_USERNAME,
+                    since: lastCheckedTime.toISOString()
+                  }
+                });
+                
+                console.log(`${assignedIssues.data.length}개의 새로 할당된 이슈 발견`);
+                
+                // 새로 할당된 이슈 알림
+                for (const issue of assignedIssues.data) {
+                  // PR이 아닌 이슈만 처리 (PR도 이슈로 반환됨)
+                  if (!issue.pull_request) {
+                    // 이슈 생성 시간을 한국 시간으로 변환
+                    const issueTime = new Date(issue.created_at);
+                    const koreaTimeOptions = { 
+                      timeZone: 'Asia/Seoul', 
+                      year: 'numeric', 
+                      month: '2-digit', 
+                      day: '2-digit',
+                      hour: '2-digit', 
+                      minute: '2-digit'
+                    };
+                    const issueTimeStr = issueTime.toLocaleString('ko-KR', koreaTimeOptions);
+                    
+                    // 이슈 내용 요약
+                    const issueBody = issue.body ? truncateText(issue.body, 200) : '(내용 없음)';
+                    
+                    await sendDiscordNotification({
+                      title: `📌 새 이슈가 할당되었습니다: #${issue.number}`,
+                      description: `**이슈**: ${issue.title}\n**작성자**: ${issue.user.login}\n**작성 시간**: ${issueTimeStr}\n\n**내용 요약**:\n${issueBody}`,
+                      url: issue.html_url,
+                      author: issue.user.login,
+                      repo: `${owner}/${repo}`
+                    });
+                  }
+                }
+                
+                // 2. 내가 생성한 이슈에 달린 새 댓글 확인
+                const myIssues = await githubAPI.get(`/repos/${owner}/${repo}/issues`, {
+                  params: { 
+                    state: 'all', 
+                    creator: GITHUB_USERNAME 
+                  }
+                });
+                
+                console.log(`${myIssues.data.length}개의 내가 생성한 이슈 발견`);
+                
+                // 이슈별로 새 댓글 확인
+                for (const issue of myIssues.data) {
+                  // PR이 아닌 이슈만 처리
+                  if (!issue.pull_request) {
+                    const comments = await githubAPI.get(issue.comments_url);
+                    
+                    // 마지막 확인 이후 새 댓글이 있는지 확인
+                    const newComments = comments.data.filter(
+                      comment => 
+                        new Date(comment.created_at) > lastCheckedTime && 
+                        comment.user.login.toLowerCase() !== GITHUB_USERNAME.toLowerCase()
+                    );
+                    
+                    for (const comment of newComments) {
+                      // 댓글 작성 시간을 한국 시간으로 변환
+                      const commentTime = new Date(comment.created_at);
+                      const koreaTimeOptions = { 
+                        timeZone: 'Asia/Seoul', 
+                        year: 'numeric', 
+                        month: '2-digit', 
+                        day: '2-digit',
+                        hour: '2-digit', 
+                        minute: '2-digit'
+                      };
+                      const commentTimeStr = commentTime.toLocaleString('ko-KR', koreaTimeOptions);
+                      
+                      await sendDiscordNotification({
+                        title: `💬 이슈에 새 댓글이 등록되었습니다: #${issue.number}`,
+                        description: `**이슈**: ${issue.title}\n**댓글 작성자**: ${comment.user.login}\n**작성 시간**: ${commentTimeStr}\n\n**댓글 내용**:\n${truncateText(comment.body, 200)}`,
+                        url: comment.html_url,
+                        author: comment.user.login,
+                        repo: `${owner}/${repo}`
+                      });
+                    }
+                  }
+                }
+                
+                // 3. 내가 언급된(@username) 이슈/댓글 확인
+                const mentionedIssues = await githubAPI.get(`/repos/${owner}/${repo}/issues`, {
+                  params: { 
+                    state: 'all', 
+                    mentioned: GITHUB_USERNAME,
+                    since: lastCheckedTime.toISOString()
+                  }
+                });
+                
+                console.log(`${mentionedIssues.data.length}개의 내가 언급된 이슈 발견`);
+                
+                for (const issue of mentionedIssues.data) {
+                  if (!issue.pull_request) {
+                    // 이슈 언급 시간을 한국 시간으로 변환
+                    const issueUpdateTime = new Date(issue.updated_at);
+                    const koreaTimeOptions = { 
+                      timeZone: 'Asia/Seoul', 
+                      year: 'numeric', 
+                      month: '2-digit', 
+                      day: '2-digit',
+                      hour: '2-digit', 
+                      minute: '2-digit'
+                    };
+                    const issueUpdateTimeStr = issueUpdateTime.toLocaleString('ko-KR', koreaTimeOptions);
+                    
+                    await sendDiscordNotification({
+                      title: `🔔 이슈에서 언급되었습니다: #${issue.number}`,
+                      description: `**이슈**: ${issue.title}\n**작성자**: ${issue.user.login}\n**언급 시간**: ${issueUpdateTimeStr}`,
+                      url: issue.html_url,
+                      author: issue.user.login,
+                      repo: `${owner}/${repo}`
+                    });
+                  }
+                }
+                
+              } catch (error) {
+                console.error(`Error checking issues for ${owner}/${repo}:`, error.message);
+              }
+            }
+          }
+
+          // 조직 디스커션 확인 (GitHub GraphQL API 사용)
+          async function checkForNewOrgDiscussions() {
+            console.log('조직 디스커션 확인 중...');
+            
+            // 환경 변수에서 조직 이름 가져오기 또는 하드코딩
+            const orgName = 'talkpick'; // 여러분의 조직 이름
+            
+            try {
+              // 조직 디스커션 목록 가져오기 (GraphQL API 사용)
+              const orgDiscussionsQuery = {
+                query: `
+                  query {
+                    organization(login: "${orgName}") {
+                      discussions(first: 20, orderBy: {field: CREATED_AT, direction: DESC}) {
+                        nodes {
+                          id
+                          title
+                          url
+                          number
+                          author {
+                            login
+                          }
+                          createdAt
+                          updatedAt
+                          body
+                          category {
+                            name
+                          }
+                          comments(first: 20, orderBy: {field: CREATED_AT, direction: DESC}) {
+                            nodes {
+                              id
+                              author {
+                                login
+                              }
+                              createdAt
+                              url
+                              body
+                              isAnswer
+                              reactionGroups {
+                                content
+                                users {
+                                  totalCount
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                `
+              };
+              
+              const discussionsResponse = await axios.post(
+                'https://api.github.com/graphql',
+                orgDiscussionsQuery,
+                {
+                  headers: {
+                    Authorization: `token ${GITHUB_TOKEN}`,
+                    'Content-Type': 'application/json'
+                  }
+                }
+              );
+              
+              // 조직 또는 디스커션 접근이 불가능한 경우 건너뛰기
+              if (!discussionsResponse.data.data.organization || 
+                  !discussionsResponse.data.data.organization.discussions) {
+                console.log(`${orgName} 조직 디스커션에 접근할 수 없습니다.`);
+                return;
+              }
+              
+              const discussions = discussionsResponse.data.data.organization.discussions.nodes || [];
+              
+              console.log(`${discussions.length}개의 조직 디스커션 발견`);
+              
+              // 2. 새 디스커션 확인
+              for (const discussion of discussions) {
+                const createdAt = new Date(discussion.createdAt);
+                
+                // 최근 생성된 디스커션 알림
+                if (createdAt > lastCheckedTime) {
+                  // 본인이 작성한 것은 제외
+                  if (discussion.author.login.toLowerCase() !== GITHUB_USERNAME.toLowerCase()) {
+                    // 디스커션 작성 시간을 한국 시간으로 변환
+                    const koreaTimeOptions = { 
+                      timeZone: 'Asia/Seoul', 
+                      year: 'numeric', 
+                      month: '2-digit', 
+                      day: '2-digit',
+                      hour: '2-digit', 
+                      minute: '2-digit'
+                    };
+                    const discussionTimeStr = createdAt.toLocaleString('ko-KR', koreaTimeOptions);
+                    
+                    // 디스커션 내용 요약
+                    const discussionBody = discussion.body ? truncateText(discussion.body, 200) : '(내용 없음)';
+                    
+                    await sendDiscordNotification({
+                      title: `📣 새 조직 디스커션이 생성되었습니다: #${discussion.number}`,
+                      description: `**제목**: ${discussion.title}\n**카테고리**: ${discussion.category ? discussion.category.name : '없음'}\n**작성자**: ${discussion.author.login}\n**작성 시간**: ${discussionTimeStr}\n\n**내용 요약**:\n${discussionBody}`,
+                      url: discussion.url,
+                      author: discussion.author.login,
+                      repo: `${orgName} (조직)`
+                    });
+                  }
+                }
+                
+                // 3. 디스커션 댓글 확인
+                const comments = discussion.comments.nodes || [];
+                
+                for (const comment of comments) {
+                  const commentCreatedAt = new Date(comment.createdAt);
+                  
+                  if (commentCreatedAt > lastCheckedTime && 
+                      comment.author.login.toLowerCase() !== GITHUB_USERNAME.toLowerCase()) {
+                        
+                    // 자신이 작성한 디스커션에 달린 댓글 알림
+                    if (discussion.author.login.toLowerCase() === GITHUB_USERNAME.toLowerCase()) {
+                      // 댓글 작성 시간을 한국 시간으로 변환
+                      const koreaTimeOptions = { 
+                        timeZone: 'Asia/Seoul', 
+                        year: 'numeric', 
+                        month: '2-digit', 
+                        day: '2-digit',
+                        hour: '2-digit', 
+                        minute: '2-digit'
+                      };
+                      const commentTimeStr = commentCreatedAt.toLocaleString('ko-KR', koreaTimeOptions);
+                      
+                      // 답변으로 표시되었는지 여부
+                      const isAnswer = comment.isAnswer ? '✅ 답변으로 표시됨' : '';
+                      
+                      await sendDiscordNotification({
+                        title: `💬 내 조직 디스커션에 새 댓글이 등록되었습니다: #${discussion.number}`,
+                        description: `**디스커션**: ${discussion.title}\n**댓글 작성자**: ${comment.author.login}\n**작성 시간**: ${commentTimeStr}\n${isAnswer}\n\n**댓글 내용**:\n${truncateText(comment.body, 200)}`,
+                        url: comment.url,
+                        author: comment.author.login,
+                        repo: `${orgName} (조직)`
+                      });
+                    }
+                    
+                    // 자신의 댓글이 달린 디스커션의 새 댓글 알림
+                    else {
+                      const userCommented = comments.some(c => 
+                        c.author.login.toLowerCase() === GITHUB_USERNAME.toLowerCase() && 
+                        new Date(c.createdAt) < commentCreatedAt
+                      );
+                      
+                      if (userCommented) {
+                        // 댓글 작성 시간을 한국 시간으로 변환
+                        const koreaTimeOptions = { 
+                          timeZone: 'Asia/Seoul', 
+                          year: 'numeric', 
+                          month: '2-digit', 
+                          day: '2-digit',
+                          hour: '2-digit', 
+                          minute: '2-digit'
+                        };
+                        const commentTimeStr = commentCreatedAt.toLocaleString('ko-KR', koreaTimeOptions);
+                        
+                        // 답변으로 표시되었는지 여부
+                        const isAnswer = comment.isAnswer ? '✅ 답변으로 표시됨' : '';
+                        
+                        await sendDiscordNotification({
+                          title: `💬 내가 참여한 조직 디스커션에 새 댓글이 등록되었습니다: #${discussion.number}`,
+                          description: `**디스커션**: ${discussion.title}\n**댓글 작성자**: ${comment.author.login}\n**작성 시간**: ${commentTimeStr}\n${isAnswer}\n\n**댓글 내용**:\n${truncateText(comment.body, 200)}`,
+                          url: comment.url,
+                          author: comment.author.login,
+                          repo: `${orgName} (조직)`
+                        });
+                      }
+                    }
+                  }
+                }
+                
+                // 4. 내가 언급된(@username) 디스커션 확인
+                // 디스커션 본문이나 댓글에서 내 사용자명이 언급되었는지 확인
+                const myMention = `@${GITHUB_USERNAME}`;
+                const updatedAt = new Date(discussion.updatedAt);
+                
+                if (updatedAt > lastCheckedTime) {
+                  // 본문에 언급된 경우
+                  if (discussion.body && discussion.body.includes(myMention) && 
+                      discussion.author.login.toLowerCase() !== GITHUB_USERNAME.toLowerCase()) {
+                    
+                    // 언급 시간을 한국 시간으로 변환
+                    const koreaTimeOptions = { 
+                      timeZone: 'Asia/Seoul', 
+                      year: 'numeric', 
+                      month: '2-digit', 
+                      day: '2-digit',
+                      hour: '2-digit', 
+                      minute: '2-digit'
+                    };
+                    const mentionTimeStr = updatedAt.toLocaleString('ko-KR', koreaTimeOptions);
+                    
+                    await sendDiscordNotification({
+                      title: `🔔 조직 디스커션에서 언급되었습니다: #${discussion.number}`,
+                      description: `**디스커션**: ${discussion.title}\n**작성자**: ${discussion.author.login}\n**언급 시간**: ${mentionTimeStr}`,
+                      url: discussion.url,
+                      author: discussion.author.login,
+                      repo: `${orgName} (조직)`
+                    });
+                  }
+                  
+                  // 댓글에 언급된 경우
+                  for (const comment of comments) {
+                    const commentCreatedAt = new Date(comment.createdAt);
+                    
+                    if (commentCreatedAt > lastCheckedTime && 
+                        comment.body && comment.body.includes(myMention) && 
+                        comment.author.login.toLowerCase() !== GITHUB_USERNAME.toLowerCase()) {
+                      
+                      // 언급 시간을 한국 시간으로 변환
+                      const koreaTimeOptions = { 
+                        timeZone: 'Asia/Seoul', 
+                        year: 'numeric', 
+                        month: '2-digit', 
+                        day: '2-digit',
+                        hour: '2-digit', 
+                        minute: '2-digit'
+                      };
+                      const mentionTimeStr = commentCreatedAt.toLocaleString('ko-KR', koreaTimeOptions);
+                      
+                      await sendDiscordNotification({
+                        title: `🔔 조직 디스커션 댓글에서 언급되었습니다: #${discussion.number}`,
+                        description: `**디스커션**: ${discussion.title}\n**댓글 작성자**: ${comment.author.login}\n**언급 시간**: ${mentionTimeStr}\n\n**댓글 내용**:\n${truncateText(comment.body, 200)}`,
+                        url: comment.url,
+                        author: comment.author.login,
+                        repo: `${orgName} (조직)`
+                      });
+                    }
+                  }
+                }
+              }
+            } catch (error) {
+              console.error(`Error checking organization discussions:`, error.message);
+              if (error.response) {
+                console.error('응답 상태 코드:', error.response.status);
+                console.error('응답 데이터 일부:', JSON.stringify(error.response.data).substring(0, 500));
+              }
+            }
+          }
+          
+          // 새 PR 리뷰 요청 확인
+          async function checkForReviewRequests() {
+            console.log('PR 리뷰 요청 확인 중...');
+            
+            for (const repoFullName of REPOS_TO_MONITOR) {
+              const [owner, repo] = repoFullName.split('/');
+              
+              try {
+                console.log(`저장소 확인 중: ${owner}/${repo}`);
+                
+                // 열린 PR 목록 가져오기
+                const response = await githubAPI.get(`/repos/${owner}/${repo}/pulls`, {
+                  params: { state: 'open' }
+                });
+                
+                console.log(`${response.data.length}개의 열린 PR 발견`);
+                
+                // 각 PR에 대해 리뷰 요청 확인
+                for (const pr of response.data) {
+                  // PR 세부 정보 가져오기 (리뷰 요청 포함)
+                  const prDetail = await githubAPI.get(`/repos/${owner}/${repo}/pulls/${pr.number}`);
+                  
+                  // 나에게 리뷰 요청이 있는지 확인
+                  const requestedReviewers = prDetail.data.requested_reviewers || [];
+                  const isRequestedForMe = requestedReviewers.some(
+                    reviewer => reviewer.login.toLowerCase() === GITHUB_USERNAME.toLowerCase()
+                  );
+                  
+                  // PR 업데이트 시간이 마지막 확인 이후인지 확인
+                  const prUpdatedAt = new Date(pr.updated_at);
+                  
+                  if (isRequestedForMe && prUpdatedAt > lastCheckedTime) {
+                    console.log(`새 리뷰 요청 발견: ${pr.title}`);
+                    
+                    // Discord로 알림 보내기
+                    await sendDiscordNotification({
+                      title: `🔍 새 PR 리뷰 요청이 왔습니다`,
+                      description: `PR: ${pr.title}`,
+                      url: pr.html_url,
+                      author: pr.user.login,
+                      repo: `${owner}/${repo}`
+                    });
+                  }
+                }
+              } catch (error) {
+                console.error(`Error checking ${owner}/${repo} PRs:`, error.message);
+              }
+            }
+          }
+          
+          // 내 PR에 리뷰가 달렸는지 확인
+          async function checkForNewReviews() {
+            console.log('PR 리뷰 확인 중...');
+            
+            for (const repoFullName of REPOS_TO_MONITOR) {
+              const [owner, repo] = repoFullName.split('/');
+              
+              try {
+                // 내가 작성한 열린 PR 가져오기
+                const response = await githubAPI.get(`/repos/${owner}/${repo}/pulls`, {
+                  params: { state: 'open', creator: GITHUB_USERNAME }
+                });
+                
+                console.log(`${response.data.length}개의 내가 작성한 PR 발견`);
+                
+                // 각 PR에 대해 새 리뷰 확인
+                for (const pr of response.data) {
+                  // PR의 리뷰 목록 가져오기
+                  const reviews = await githubAPI.get(`/repos/${owner}/${repo}/pulls/${pr.number}/reviews`);
+                  
+                  // 마지막 확인 이후 새 리뷰가 있는지 확인
+                  const newReviews = reviews.data.filter(
+                    review => new Date(review.submitted_at) > lastCheckedTime
+                  );
+                  
+                  console.log(`PR #${pr.number}에 ${newReviews.length}개의 새 리뷰 발견`);
+                  
+                  // 새 리뷰가 있으면 알림 보내기
+                  for (const review of newReviews) {
+                    // 리뷰 상태에 따른 이모지와 텍스트 설정
+                    const stateEmoji = getReviewStateEmoji(review.state);
+                    let stateText = review.state;
+                    
+                    switch(review.state) {
+                      case 'APPROVED':
+                        stateText = '승인됨';
+                        break;
+                      case 'CHANGES_REQUESTED':
+                        stateText = '변경 요청됨';
+                        break;
+                      case 'COMMENTED':
+                        stateText = '코멘트 작성됨';
+                        break;
+                    }
+                    
+                    // 리뷰 내용 요약 (200자 제한)
+                    const reviewBody = review.body ? truncateText(review.body, 200) : '(내용 없음)';
+                    
+                    // 리뷰 작성 시간을 한국 시간으로 변환
+                    const reviewTime = new Date(review.submitted_at);
+                    const koreaTimeOptions = { 
+                      timeZone: 'Asia/Seoul', 
+                      year: 'numeric', 
+                      month: '2-digit', 
+                      day: '2-digit',
+                      hour: '2-digit', 
+                      minute: '2-digit'
+                    };
+                    const reviewTimeStr = reviewTime.toLocaleString('ko-KR', koreaTimeOptions);
+                    
+                    await sendDiscordNotification({
+                      title: `⚠️ PR에 새 리뷰가 등록되었습니다: ${stateEmoji} ${stateText}`,
+                      description: `**PR**: ${pr.title}\n**리뷰어**: ${review.user.login}\n**작성 시간**: ${reviewTimeStr}\n\n**내용 요약**:\n${reviewBody}`,
+                      url: review.html_url,
+                      author: review.user.login,
+                      repo: `${owner}/${repo}`
+                    });
+                  }
+                }
+              } catch (error) {
+                console.error(`Error checking reviews for ${owner}/${repo}:`, error.message);
+              }
+            }
+          }
+          
+          // 리뷰 상태에 따른 이모지 반환
+          function getReviewStateEmoji(state) {
+            switch (state) {
+              case 'APPROVED': return '✅';
+              case 'CHANGES_REQUESTED': return '❌';
+              case 'COMMENTED': return '💬';
+              default: return '❓';
+            }
+          }
+          
+          // 텍스트 자르기 함수
+          function truncateText(text, maxLength) {
+            if (!text) return '';
+            if (text.length <= maxLength) return text;
+            return text.substring(0, maxLength) + '...';
+          }
+          
+          // Discord로 알림 보내기
+          async function sendDiscordNotification(data) {
+            try {
+              await axios.post(DISCORD_WEBHOOK_URL, {
+                embeds: [{
+                  title: data.title,
+                  description: data.description,
+                  url: data.url,
+                  color: 3447003, // 파란색
+                  author: {
+                    name: data.author
+                  },
+                  footer: {
+                    text: `Repository: ${data.repo}`
+                  },
+                  timestamp: new Date()
+                }]
+              });
+              console.log('알림 전송 완료:', data.title);
+            } catch (error) {
+              console.error('Discord 알림 전송 실패:', error.message);
+              console.error('오류 세부 정보:', error.response ? error.response.data : '응답 데이터 없음');
+            }
+          }          
+          async function main() {
+            try {            
+              // 각 기능별로 확인 실행
+              await checkForReviewRequests();
+              await checkForNewReviews();
+              await checkForNewIssuesAndComments();
+              await checkForNewOrgDiscussions();
+              
+              console.log('모든 확인 완료');
+            } catch (error) {
+              console.error('실행 중 오류 발생:', error);
+            }
+          }
+          
+          // 스크립트 실행
+          main();
+          EOL
+      
+      - name: Run notification script
+        env:
+          PERSONAL_GITHUB_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          MY_GITHUB_USERNAME: ${{ secrets.MY_GITHUB_USERNAME }}
+          REPOS_TO_MONITOR: ${{ secrets.REPOS_TO_MONITOR }}
+        run: node github-monitor.js
