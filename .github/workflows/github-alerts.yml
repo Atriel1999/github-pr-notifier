@@ -445,9 +445,10 @@ jobs:
               }
             } catch (error) {
               console.error(`Error checking organization discussions:`, error.message);
+              console.error('전체 오류:', error);
               if (error.response) {
                 console.error('응답 상태 코드:', error.response.status);
-                console.error('응답 데이터 일부:', JSON.stringify(error.response.data).substring(0, 500));
+                console.error('응답 데이터:', JSON.stringify(error.response.data, null, 2));
               }
             }
           }
