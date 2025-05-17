@@ -9,15 +9,13 @@ jobs:
   check-events:
     runs-on: ubuntu-latest
     steps:
+      # 이 단계가 반드시 있어야 합니다! 저장소 코드 체크아웃
       - name: Checkout code
         uses: actions/checkout@v3
-        with:
-          fetch-depth: 1  # 명시적으로 체크아웃 깊이 설정
       
-      - name: List files for debugging
-        run: |
-          pwd
-          ls -la
+      # 디버깅용 파일 리스트 확인 (실제 파일이 체크아웃되었는지 확인)
+      - name: Check files
+        run: ls -la
       
       - name: Setup Node.js
         uses: actions/setup-node@v3
@@ -33,4 +31,4 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           MY_GITHUB_USERNAME: ${{ secrets.MY_GITHUB_USERNAME }}
           REPOS_TO_MONITOR: ${{ secrets.REPOS_TO_MONITOR }}
-        run: node $GITHUB_WORKSPACE/repo-checker.js
+        run: node repo-checker.js
