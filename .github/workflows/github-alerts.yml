@@ -50,7 +50,7 @@ jobs:
           const lastCheckedTime = new Date();
           lastCheckedTime.setMinutes(lastCheckedTime.getMinutes() - 35); // 30분 + 5분 여유
           
-          console.log('GitHub 알림 체커 시작됨');
+          console.log('GitHub 알림 체커 시작됨!!');
           console.log('모니터링 중인 저장소:', REPOS_TO_MONITOR);
           console.log('사용자:', GITHUB_USERNAME);
           console.log('마지막 확인 시간:', lastCheckedTime.toISOString());
